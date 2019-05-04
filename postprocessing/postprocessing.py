@@ -1,9 +1,13 @@
-
 # Postprocessing
+
+
+import colorsys
 import numpy as np
 import tensorflow as tf
-from configs.config_test import *
+from collections import Counter
+from PIL import ImageFont, ImageDraw, Image
 
+from configs.config_test import *
 
 
 class Postprocessing(object):
@@ -12,165 +16,135 @@ class Postprocessing(object):
         a=1
 
 
-    # This function selects top bounding boxes from network output layers.
-    # Inputs:
-    #      predictions_net: List of SSD prediction layers;
-    #      localizations_net: List of localization layers;
-    # Outputs:
-    #      d_scores, d_bboxes
-    def select_top_bboxes(self, predictions_net, localizations_net, scope=None):
-
-        with tf.name_scope(scope, 'ssd_bboxes_select', [predictions_net, localizations_net]):
-            l_scores = []
-            l_bboxes = []
-            for i in range(len(predictions_net)):
-                scores, bboxes = self.select_top_bboxes_layer(predictions_net[i], localizations_net[i])
-                l_scores.append(scores)
-                l_bboxes.append(bboxes)
-            # Concat results.
-            d_scores = {}
-            d_bboxes = {}
-            for c in l_scores[0].keys():
-                ls = [s[c] for s in l_scores]
-                lb = [b[c] for b in l_bboxes]
-                d_scores[c] = tf.concat(ls, axis=1)
-                d_bboxes[c] = tf.concat(lb, axis=1)
-            return d_scores, d_bboxes
 
 
+    def py_nms(self, boxes, scores, max_boxes=50, iou_thresh=0.5):
+        """
+        Pure Python NMS baseline.
 
-    # Select top bounding boxes from features in one layer.
-    # Inputs:
-    #      predictions_layer: A SSD prediction layer
-    #      localizations_layer: A SSD localization layer
-    # Outputs:
-    #      d_scores, d_bboxes
-    def select_top_bboxes_layer(self, predictions_layer, localizations_layer, scope=None):
-        select_threshold = 0.0 if FLAGS.test_select_threshold is None else FLAGS.test_select_threshold
-        p_shape = self.get_shape(predictions_layer)
-        predictions_layer = tf.reshape(predictions_layer, tf.stack([p_shape[0], -1, p_shape[-1]]))
-        l_shape = self.get_shape(localizations_layer)
-        localizations_layer = tf.reshape(localizations_layer, tf.stack([l_shape[0], -1, l_shape[-1]]))
-        d_scores = {}
-        d_bboxes = {}
-        for c in range(1, FLAGS.num_classes):
-            # Remove boxes under the threshold.
-            scores = predictions_layer[:, :, c]
-            fmask = tf.cast(tf.greater_equal(scores, select_threshold), scores.dtype)
-            scores = scores * fmask
-            bboxes = localizations_layer * tf.expand_dims(fmask, axis=-1)
-            # Append to dictionary.
-            d_scores[c] = scores
-            d_bboxes[c] = bboxes
-        return d_scores, d_bboxes
+        Arguments: boxes => shape of [-1, 4], the value of '-1' means that dont know the
+                            exact number of boxes
+                   scores => shape of [-1,]
+                   max_boxes => representing the maximum of boxes to be selected by non_max_suppression
+                   iou_thresh => representing iou_threshold for deciding to keep boxes
+        """
+        assert boxes.shape[1] == 4 and len(scores.shape) == 1
+
+        x1 = boxes[:, 0]
+        y1 = boxes[:, 1]
+        x2 = boxes[:, 2]
+        y2 = boxes[:, 3]
+
+        areas = (x2 - x1 + 1) * (y2 - y1 + 1)
+        order = scores.argsort()[::-1]
+
+        keep = []
+        while order.size > 0:
+            i = order[0]
+            keep.append(i)
+            xx1 = np.maximum(x1[i], x1[order[1:]])
+            yy1 = np.maximum(y1[i], y1[order[1:]])
+            xx2 = np.minimum(x2[i], x2[order[1:]])
+            yy2 = np.minimum(y2[i], y2[order[1:]])
+
+            w = np.maximum(0.0, xx2 - xx1 + 1)
+            h = np.maximum(0.0, yy2 - yy1 + 1)
+            inter = w * h
+            ovr = inter / (areas[i] + areas[order[1:]] - inter)
+
+            inds = np.where(ovr <= iou_thresh)[0]
+            order = order[inds + 1]
+
+        return keep[:max_boxes]
 
 
 
 
-    # Sort bounding boxes 
-    # Inputs:
-    #      scores, bboxes: 
-    # Outputs:
-    #      scores, bboxes
-    def sort_bboxes(self, scores, bboxes):
+    def non_maximum_supression(self, boxes, scores, num_classes, max_boxes=50, score_thresh=0.3, iou_thresh=0.5):
+        """
+        /*----------------------------------- NMS on cpu ---------------------------------------*/
+        Arguments:
+            boxes ==> shape [1, 10647, 4]
+            scores ==> shape [1, 10647, num_classes]
+        """
 
-        if isinstance(scores, dict) or isinstance(bboxes, dict):
-            d_scores = {}
-            d_bboxes = {}
-            for c in scores.keys():
-                    d_scores[c], d_bboxes[c] = self.sort_bboxes(scores[c], bboxes[c])
-            return d_scores, d_bboxes
-        scores, idxes = tf.nn.top_k(scores, k=FLAGS.test_sort_top_k, sorted=True)
-        r = tf.map_fn(lambda x: [tf.gather(x[0], x[1])], [bboxes, idxes], dtype=[bboxes.dtype],
-                          parallel_iterations=10, back_prop=False, swap_memory=False, infer_shape=True)
-        bboxes = r[0]
-        return scores, bboxes
+        boxes = boxes.reshape(-1, 4)
+        scores = scores.reshape(-1, num_classes)
+        # Picked bounding boxes
+        picked_boxes, picked_score, picked_label = [], [], []
 
+        for i in range(num_classes):
+            indices = np.where(scores[:,i] >= score_thresh)
+            filter_boxes = boxes[indices]
+            filter_scores = scores[:,i][indices]
+            if len(filter_boxes) == 0: continue
+            # do non_max_suppression on the cpu
+            indices = self.py_nms(filter_boxes, filter_scores,
+                             max_boxes=max_boxes, iou_thresh=iou_thresh)
+            picked_boxes.append(filter_boxes[indices])
+            picked_score.append(filter_scores[indices])
+            picked_label.append(np.ones(len(indices), dtype='int32')*i)
+        if len(picked_boxes) == 0: return None, None, None
 
+        boxes = np.concatenate(picked_boxes, axis=0)
+        score = np.concatenate(picked_score, axis=0)
+        label = np.concatenate(picked_label, axis=0)
 
-
-    # Apply non-maximum selection to bounding boxes. 
-    # Inputs:
-    #      scores, bboxes
-    # Outputs:
-    #      scores, bboxes 
-    def bboxes_nms(self, scores, bboxes):
-        # Apply NMS algorithm.
-        idxes = tf.image.non_max_suppression(bboxes, scores, FLAGS.test_nms_top_k, FLAGS.test_matching_threshold)
-        scores = tf.gather(scores, idxes)
-        bboxes = tf.gather(bboxes, idxes)
-        # Pad results.
-        scores = self.pad_axis(scores, 0, FLAGS.test_nms_top_k, axis=0)
-        bboxes = self.pad_axis(bboxes, 0, FLAGS.test_nms_top_k, axis=0)
-        return scores, bboxes
-
-
-
-    # Apply non-maximum selection to bounding boxes. 
-    # Inputs:
-    #      scores, bboxes
-    # Outputs:
-    #      scores, bboxes 
-    def non_maximum_supression_bboxes(self, scores, bboxes):
-        # Dictionaries as inputs:
-        if isinstance(scores, dict) or isinstance(bboxes, dict):
-                d_scores = {}
-                d_bboxes = {}
-                for c in scores.keys():
-                    d_scores[c], d_bboxes[c] = self.non_maximum_supression_bboxes(scores[c], bboxes[c])
-                return d_scores, d_bboxes
-        # Tensors as inputs:
-        r = tf.map_fn(lambda x: self.bboxes_nms(x[0], x[1]),
-                          (scores, bboxes), dtype=(scores.dtype, bboxes.dtype), parallel_iterations=10,
-                          back_prop=False, swap_memory=False, infer_shape=True)
-        scores, bboxes = r
-        return scores, bboxes
-
-
-
-
-    # Pad a tensor on an axis, with a given offset and output size. The tensor is padded with zero. 
-    # Inputs:
-    #      x: Tensor to pad;
-    #      offset: Offset to add on the dimension chosen;
-    #      size: Final size of the dimension.
-    # Outputs:
-    #      Padded tensor 
-    def pad_axis(self, x, offset, size, axis=0, name=None):
-        with tf.name_scope(name, 'pad_axis'):
-            shape = self.get_shape(x)
-            rank = len(shape)
-            new_size = tf.maximum(size-offset-shape[axis], 0)
-            pad1 = tf.stack([0]*axis + [offset] + [0]*(rank-axis-1))
-            pad2 = tf.stack([0]*axis + [new_size] + [0]*(rank-axis-1))
-            paddings = tf.stack([pad1, pad2], axis=1)
-            x = tf.pad(x, paddings, mode='CONSTANT')
-            shape[axis] = size
-            x = tf.reshape(x, tf.stack(shape))
-            return x
-
-
-
-    # Returns the dimensions of a Tensor as list of integers or scale tensors.
-    # Inputs:
-    #      x: N-d Tensor;
-    # Outputs:
-    #      A list of dimensions of input tensor. 
-    def get_shape(self, x, rank=None):
-        if x.get_shape().is_fully_defined():
-            return x.get_shape().as_list()
-        else:
-            static_shape = x.get_shape()
-            if rank is None:
-                static_shape = static_shape.as_list()
-                rank = len(static_shape)
-            else:
-                static_shape = x.get_shape().with_rank(rank).as_list()
-            dynamic_shape = tf.unstack(tf.shape(x), rank)
-            return [s if s is not None else d
-                    for s, d in zip(static_shape, dynamic_shape)]
-
-
-
+        return boxes, score, label
 
  
+   
+    def box_detection(self, sess, y_pred_tensor, y_true_tensor, images_tensor, NUM_CLASSES):
+
+       for image_idx in range(3): #FLAGS.test_number_of_test_images):    
+            y_pred, y_true, image  = sess.run([y_pred_tensor, y_true_tensor, images_tensor])
+            
+            pred_boxes = y_pred[0][0]
+            pred_confs = y_pred[1][0]
+            pred_probs = y_pred[2][0]
+            image = Image.fromarray(np.uint8(image[0]*255))
+
+            true_labels_list, true_boxes_list = [], []
+            for i in range(3):
+                true_probs_temp = y_true[i][..., 5: ]
+                true_boxes_temp = y_true[i][..., 0:4]
+                object_mask     = true_probs_temp.sum(axis=-1) > 0
+
+                true_probs_temp = true_probs_temp[object_mask]
+                true_boxes_temp = true_boxes_temp[object_mask]
+
+                true_labels_list += np.argmax(true_probs_temp, axis=-1).tolist()
+                true_boxes_list  += true_boxes_temp.tolist()
+
+            pred_boxes, pred_scores, pred_labels = self.non_maximum_supression(pred_boxes,
+                                                          pred_confs*pred_probs, NUM_CLASSES,
+                                                          score_thresh=FLAGS.test_score_threshold, iou_thresh=FLAGS.test_iou_threshold)
+            #image = utils.draw_boxes(image, pred_boxes, pred_scores, pred_labels, CLASSES, [FLAGS.test_image_height, FLAGS.test_image_width], show=True)
+
+            true_boxes = np.array(true_boxes_list)
+            box_centers, box_sizes = true_boxes[:,0:2], true_boxes[:,2:4]
+
+            true_boxes[:,0:2] = box_centers - box_sizes / 2.
+            true_boxes[:,2:4] = true_boxes[:,0:2] + box_sizes
+            pred_labels_list = [] if pred_labels is None else pred_labels.tolist()
+
+            all_detections   = []
+            all_annotations  = []
+            all_detections.append( [pred_boxes, pred_scores, pred_labels_list])
+            all_annotations.append([true_boxes, true_labels_list])
+            print('image_idx:', image_idx)
+
+       return all_detections, all_annotations
+
+
+
+
+
+
+
+
+
+
+
+
+
