@@ -1,5 +1,5 @@
 
-# Person Detection Security System
+# Indoor/Outdoor Security System
 
 Goal of this project is deployment of security system for detection of human for indoor/outdoor. 
 
@@ -11,32 +11,84 @@ have real-time performance.
 
 
 
+# 1.Training 
+
+## Dataset
+
+
+## Backbone Network
 
 
 
 
-### 4.3 Neural network io:
--  **input** : [None, 416, 416, 3]
--  **output** : confidece of an object being present in the rectangle, list of rectangles position and sizes and classes of the objects begin detected. Each bounding box is represented by 6 numbers `(Rx, Ry, Rw, Rh, Pc, C1..Cn)` as explained above. In this case n=80, which means we have `c` as 80-dimensional vector, and the final size of representing the bounding box is 85.The first number `Pc` is the confidence of an project, The second four number `bx, by, bw, bh` represents the information of bounding boxes. The last 80 number each is the output probability of corresponding-index class.
-
-### 4.4 Filtering with score threshold
-
-The output result may contain several rectangles that are false positives or overlap,  if your input image size of `[416, 416, 3]`, you will get `(52X52+26X26+13X13)x3=10647` boxes since YOLO v3 totally uses 9 anchor boxes. (Three for each scale). So It is time to find a way to reduce them. The first attempt to reduce these rectangles is to filter them by score threshold.
+## Number of Prior Boxes
 
 
-### 4.5  non-maximum suppression
 
-Even after yolo filtering by thresholding over, we still have a lot of overlapping boxes. Second approach and filtering is Non-Maximum suppression algorithm.
+## MultiBox Detection
 
-* Discard all boxes with `Pc <= 0.4`  
-* While there are any remaining boxes : 
-    * Pick the box with the largest `Pc`
-    * Output that as a prediction
-    * Discard any remaining boxes with `IOU>=0.5` with the box output in the previous step
 
-In tensorflow, we can simply implement non maximum suppression algorithm like this. more details see [here](https://github.com/YunYang1994/tensorflow-yolov3/blob/master/core/utils.py)
-```
-for i in range(num_classes):
-    tf.image.non_max_suppression(boxes, score[:,i], iou_threshold=0.5) 
- ```
+
+## Hard Negative Mining (HNM)
+
+
+## Image Augmentation
+
+
+
+## Loss function
+
+
+
+
+## Fine-tuning
+
+
+
+
+
+# 2.Deployment on DragonBoard 410c
+To deploy YOLOv3 object detection on the DragonBoard 410c, I did/prepared the following steps:
+
+
+### Hardware requirements:
+- Using a DragonBoard 410c, USB camera, keyboard, mouse, HDMI monitor.
+- Using a 16GB MicroSD Card
+- Partition the 16GB MicroSD card into 4GB and 12GB.
+- The 4GB of SD card was used to increase the memory (DragonBoard 410c has 1GB memory).
+- The 12GB of SD card was used to increase the storage (DragonBoard 410c has 8GB storage).
+
+
+### Software requirements:
+- Installation of Debian linux
+- Installation of Bazel (to compile tensorflow)
+- Installation of Tensorflow 
+- Installation of OpenCV
+- The object detection code
+
+
+### Pipeline of our system for vehicle and pedestrain detection
+The pipeline of our system includes the following steps:
+
+- Capture the live video from camera 
+- Extract the images/frames from the input video 
+- Resize every image/frame for the YOLOv3 network
+- Run the YOLOv3 network on the resized image/frame
+- Apply the Non-Maximum Suppression algorithm to get rid of multiple detections of a single object
+- Display the frames with the bounding box of detected objects.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  
