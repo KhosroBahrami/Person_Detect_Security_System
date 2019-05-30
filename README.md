@@ -67,7 +67,7 @@ To deploy YOLOv3 object detection on the DragonBoard 410c, I did/prepared the fo
 - The object detection code
 
 
-### Pipeline of our system for vehicle and pedestrain detection
+### Pipeline of our system for pedestrain detection
 The pipeline of our system includes the following steps:
 
 - Capture the live video from camera 
